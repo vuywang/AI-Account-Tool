@@ -1,0 +1,29 @@
+[package]
+name = "ai-account-tool"
+version = "0.1.0"
+description = "Windows Codex account manager"
+authors = ["AI Account Tool"]
+edition = "2021"
+
+[lib]
+name = "ai_account_tool_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sysinfo = "0.33"
+tauri = { version = "2", features = [] }
+toml_edit = "0.20"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Threading"] }
