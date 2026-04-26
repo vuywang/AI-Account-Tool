@@ -11,7 +11,7 @@ import {
   Trash2,
   UserRound,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type AuthMode = "oauth" | "apikey";
 
@@ -24,6 +24,7 @@ type CodexAccount = {
   accountId?: string | null;
   organizationId?: string | null;
   planType?: string | null;
+  subscriptionActiveUntil?: number | null;
   hasApiKey: boolean;
   hasRefreshToken: boolean;
   quota?: CodexQuota | null;
@@ -130,6 +131,17 @@ const emptyInstanceForm: InstanceForm = {
 function formatDate(timestamp?: number | null) {
   if (!timestamp) return "尚未启动";
   return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(timestamp * 1000));
+}
+
+function formatDateTime(timestamp?: number | null) {
+  if (!timestamp) return "未知";
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -260,6 +272,7 @@ export default function App() {
   const [apiKeyForm, setApiKeyForm] = useState<ApiKeyForm>(emptyApiKeyForm);
   const [tokenForm, setTokenForm] = useState<TokenForm>(emptyTokenForm);
   const [instanceForm, setInstanceForm] = useState<InstanceForm>(emptyInstanceForm);
+  const loginPollRef = useRef<number | null>(null);
 
   const currentAccount = useMemo(
     () => state?.accounts.find((account) => account.id === state.currentAccountId) ?? null,
@@ -287,11 +300,48 @@ export default function App() {
     setState(next);
   }
 
+  function clearLoginPoll() {
+    if (loginPollRef.current != null) {
+      window.clearInterval(loginPollRef.current);
+      loginPollRef.current = null;
+    }
+  }
+
+  function watchLoginImport(codexHome: string, label: string | null) {
+    clearLoginPoll();
+    let importing = false;
+
+    const tryImport = async () => {
+      if (importing) return;
+      importing = true;
+      try {
+        const next = await invoke<AppState>("import_current_codex_account", {
+          codexHome,
+          label,
+        });
+        setState(next);
+        setImportLabel("");
+        setError(null);
+        setMessage("登录完成，已自动导入账号");
+        clearLoginPoll();
+      } catch {
+        // 登录可能还在浏览器里进行中；失败不打扰界面，继续等 auth.json。
+      } finally {
+        importing = false;
+      }
+    };
+
+    loginPollRef.current = window.setInterval(tryImport, 1000);
+    void tryImport();
+  }
+
   useEffect(() => {
     refresh()
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => () => clearLoginPoll(), []);
 
   async function importLocal(event: FormEvent) {
     event.preventDefault();
@@ -306,6 +356,21 @@ export default function App() {
         setImportLabel("");
       },
       "已从 auth.json 导入账号",
+    );
+  }
+
+  async function loginAndImport() {
+    await runAction(
+      "login-import",
+      async () => {
+        const label = importLabel || null;
+        const loginHome = await invoke<string>("start_codex_login", {
+          codexHome: importHome || null,
+        });
+        setImportHome(loginHome);
+        setMessage("已打开 Codex 登录，登录成功后会自动导入账号");
+        watchLoginImport(loginHome, label);
+      },
     );
   }
 
@@ -551,6 +616,10 @@ export default function App() {
             <button className="button primary" disabled={busy === "import"}>
               <UserRound size={16} /> 导入本机账号
             </button>
+            <button type="button" className="button primary" onClick={loginAndImport} disabled={busy === "login-import"}>
+              <UserRound size={16} /> 登录并导入
+            </button>
+            <p className="form-hint">留空 CODEX_HOME 时会使用独立登录目录，登录成功后自动保存 refresh_token。</p>
           </form>
 
           <div className="account-list">
@@ -572,7 +641,11 @@ export default function App() {
                   </div>
                   <p>{account.email}</p>
                   <small>
-                    {account.planType ?? "Codex"} · 最近使用 {formatDate(account.lastUsed)}
+                    {account.planType ?? "Codex"}
+                    {account.subscriptionActiveUntil
+                      ? ` · 订阅到期 ${formatDateTime(account.subscriptionActiveUntil)}`
+                      : ""}
+                    {" · "}最近使用 {formatDate(account.lastUsed)}
                     {account.apiBaseUrl ? ` · ${account.apiBaseUrl}` : ""}
                   </small>
                   <AccountQuota account={account} onRefresh={() => refreshQuota(account)} />

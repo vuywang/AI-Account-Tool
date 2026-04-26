@@ -9,7 +9,7 @@ pub enum CodexAuthMode {
     Apikey,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexTokens {
     pub id_token: String,
@@ -37,6 +37,8 @@ pub struct CodexAccount {
     pub organization_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription_active_until: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<CodexTokens>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,6 +92,7 @@ pub struct CodexAccountView {
     pub account_id: Option<String>,
     pub organization_id: Option<String>,
     pub plan_type: Option<String>,
+    pub subscription_active_until: Option<i64>,
     pub has_api_key: bool,
     pub has_refresh_token: bool,
     pub quota: Option<CodexQuota>,
@@ -110,6 +113,7 @@ impl From<&CodexAccount> for CodexAccountView {
             account_id: account.account_id.clone(),
             organization_id: account.organization_id.clone(),
             plan_type: account.plan_type.clone(),
+            subscription_active_until: account.subscription_active_until,
             has_api_key: account
                 .openai_api_key
                 .as_deref()

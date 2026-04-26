@@ -41,6 +41,16 @@ pub struct QuotaFetchResult {
     pub plan_type: Option<String>,
 }
 
+pub fn should_refresh_token_after_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("401")
+        && (lower.contains("token_expired")
+            || lower.contains("token_invalidated")
+            || lower.contains("authentication token is expired")
+            || lower.contains("authentication token has been invalidated")
+            || lower.contains("unauthorized"))
+}
+
 fn remaining_percentage(window: &WindowInfo) -> i32 {
     100 - window.used_percent.unwrap_or(0).clamp(0, 100)
 }

@@ -10,6 +10,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_app_state,
             commands::import_current_codex_account,
+            commands::start_codex_login,
             commands::add_api_key_account,
             commands::add_token_account,
             commands::switch_account,

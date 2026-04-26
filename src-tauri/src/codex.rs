@@ -1,11 +1,11 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use sysinfo::{Pid, System};
 use toml_edit::{value, Document};
 
@@ -19,6 +19,8 @@ use crate::storage::{
 };
 
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_OAUTH_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,10 +75,46 @@ fn auth_payload_value<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
         .and_then(|value| value.as_str())
 }
 
+fn normalize_timestamp(raw: i64) -> Option<i64> {
+    if raw <= 0 {
+        return None;
+    }
+    if raw > 10_000_000_000 {
+        return Some(raw / 1000);
+    }
+    Some(raw)
+}
+
+fn parse_timestamp_text(raw: &str) -> Option<i64> {
+    let value = normalize_optional_ref(Some(raw))?;
+    if let Ok(timestamp) = value.parse::<i64>() {
+        return normalize_timestamp(timestamp);
+    }
+    DateTime::parse_from_rfc3339(&value)
+        .ok()
+        .map(|item| item.timestamp())
+}
+
+fn auth_payload_timestamp(payload: &Value, key: &str) -> Option<i64> {
+    let value = payload
+        .get("https://api.openai.com/auth")
+        .and_then(|item| item.get(key))?;
+    value
+        .as_i64()
+        .and_then(normalize_timestamp)
+        .or_else(|| value.as_str().and_then(parse_timestamp_text))
+}
+
 pub fn extract_oauth_profile(
     id_token: &str,
     access_token: &str,
-) -> (String, Option<String>, Option<String>, Option<String>) {
+) -> (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+) {
     let id_payload = parse_jwt_payload(id_token);
     let access_payload = parse_jwt_payload(access_token);
 
@@ -122,7 +160,63 @@ pub fn extract_oauth_profile(
         })
         .and_then(|value| normalize_optional_ref(Some(value)));
 
-    (email, plan_type, account_id, organization_id)
+    let subscription_active_until = id_payload
+        .as_ref()
+        .and_then(|payload| auth_payload_timestamp(payload, "chatgpt_subscription_active_until"))
+        .or_else(|| {
+            access_payload.as_ref().and_then(|payload| {
+                auth_payload_timestamp(payload, "chatgpt_subscription_active_until")
+            })
+        });
+
+    (
+        email,
+        plan_type,
+        account_id,
+        organization_id,
+        subscription_active_until,
+    )
+}
+
+pub fn sync_account_metadata_from_tokens(account: &mut CodexAccount) -> bool {
+    if account.auth_mode != CodexAuthMode::OAuth {
+        return false;
+    }
+    let Some(tokens) = account.tokens.as_ref() else {
+        return false;
+    };
+    let (email, plan_type, account_id, organization_id, subscription_active_until) =
+        extract_oauth_profile(&tokens.id_token, &tokens.access_token);
+    let mut changed = false;
+
+    if account.email != email && email != "unknown-codex-account" {
+        account.email = email;
+        changed = true;
+    }
+    if account.plan_type != plan_type {
+        account.plan_type = plan_type;
+        changed = true;
+    }
+    if account.account_id != account_id {
+        account.account_id = account_id.clone();
+        changed = true;
+    }
+    if account.organization_id != organization_id {
+        account.organization_id = organization_id;
+        changed = true;
+    }
+    if account.subscription_active_until != subscription_active_until {
+        account.subscription_active_until = subscription_active_until;
+        changed = true;
+    }
+    if let Some(tokens) = account.tokens.as_mut() {
+        if tokens.account_id != account_id {
+            tokens.account_id = account_id;
+            changed = true;
+        }
+    }
+
+    changed
 }
 
 pub fn api_key_label(api_key: &str) -> String {
@@ -298,6 +392,7 @@ pub fn parse_auth_file_from_path(
             account_id: None,
             organization_id: None,
             plan_type: Some("API_KEY".to_string()),
+            subscription_active_until: None,
             tokens: None,
             quota: None,
             quota_error: None,
@@ -310,7 +405,7 @@ pub fn parse_auth_file_from_path(
     let tokens = auth_file
         .tokens
         .ok_or_else(|| "auth.json 缺少 OAuth tokens".to_string())?;
-    let (email, plan_type, extracted_account_id, organization_id) =
+    let (email, plan_type, extracted_account_id, organization_id, subscription_active_until) =
         extract_oauth_profile(&tokens.id_token, &tokens.access_token);
     let account_id = normalize_optional(tokens.account_id.clone()).or(extracted_account_id);
     let id = account_id_for_oauth(&email, account_id.as_deref(), organization_id.as_deref());
@@ -324,6 +419,7 @@ pub fn parse_auth_file_from_path(
         account_id,
         organization_id,
         plan_type,
+        subscription_active_until,
         tokens: Some(CodexTokens {
             id_token: tokens.id_token,
             access_token: tokens.access_token,
@@ -346,6 +442,58 @@ pub fn upsert_account(store: &mut Store, mut account: CodexAccount) -> CodexAcco
         store.accounts.push(account.clone());
     }
     account
+}
+
+pub async fn refresh_oauth_tokens(
+    refresh_token: &str,
+    account_id: Option<String>,
+) -> Result<CodexTokens, String> {
+    let response = reqwest::Client::new()
+        .post(CODEX_OAUTH_TOKEN_ENDPOINT)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", CODEX_OAUTH_CLIENT_ID),
+        ])
+        .send()
+        .await
+        .map_err(|err| format!("Token 刷新请求失败: {}", err))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("读取 Token 刷新响应失败: {}", err))?;
+
+    if !status.is_success() {
+        let preview = body.chars().take(240).collect::<String>();
+        return Err(format!("Token 刷新失败: {}, {}", status, preview));
+    }
+
+    let value: Value =
+        serde_json::from_str(&body).map_err(|err| format!("解析 Token 刷新响应失败: {}", err))?;
+    let id_token = value
+        .get("id_token")
+        .and_then(|item| item.as_str())
+        .and_then(|item| normalize_optional_ref(Some(item)))
+        .ok_or_else(|| "Token 刷新响应缺少 id_token".to_string())?;
+    let access_token = value
+        .get("access_token")
+        .and_then(|item| item.as_str())
+        .and_then(|item| normalize_optional_ref(Some(item)))
+        .ok_or_else(|| "Token 刷新响应缺少 access_token".to_string())?;
+    let next_refresh_token = value
+        .get("refresh_token")
+        .and_then(|item| item.as_str())
+        .and_then(|item| normalize_optional_ref(Some(item)))
+        .or_else(|| Some(refresh_token.to_string()));
+
+    Ok(CodexTokens {
+        id_token,
+        access_token,
+        refresh_token: next_refresh_token,
+        account_id,
+    })
 }
 
 fn process_running(pid: Option<u32>) -> bool {
@@ -375,6 +523,19 @@ fn hidden_output(command: &mut Command) -> std::io::Result<Output> {
 #[cfg(not(windows))]
 fn hidden_output(command: &mut Command) -> std::io::Result<Output> {
     command.output()
+}
+
+#[cfg(windows)]
+fn hidden_spawn(command: &mut Command) -> std::io::Result<Child> {
+    use std::os::windows::process::CommandExt;
+
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    command.spawn()
+}
+
+#[cfg(not(windows))]
+fn hidden_spawn(command: &mut Command) -> std::io::Result<Child> {
+    command.spawn()
 }
 
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
@@ -590,4 +751,24 @@ pub fn spawn_codex_terminal(instance: &CodexInstance) -> Result<(Option<u32>, St
         .spawn()
         .map_err(|err| format!("启动 cmd.exe 失败: {}", err))?;
     Ok((Some(child.id()), format!("cmd.exe /d /k {}", script)))
+}
+
+pub fn spawn_codex_login(codex_home: &Path) -> Result<(), String> {
+    let cli = codex_cli_status()
+        .path
+        .ok_or_else(|| "未找到 Codex CLI，请先安装 npm 版 @openai/codex".to_string())?;
+    fs::create_dir_all(codex_home)
+        .map_err(|err| format!("创建 CODEX_HOME 失败: {}, {}", codex_home.display(), err))?;
+
+    let mut command = Command::new(&cli);
+    command
+        .arg("login")
+        .env("CODEX_HOME", codex_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let _child =
+        hidden_spawn(&mut command).map_err(|err| format!("启动 Codex 登录失败: {}", err))?;
+    Ok(())
 }

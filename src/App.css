@@ -376,7 +376,7 @@ h2 {
 .inline-form,
 .instance-form {
   display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(0, 0.8fr) auto;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 0.8fr) auto auto;
   gap: 10px;
   align-items: end;
   padding: 12px;
@@ -387,6 +387,12 @@ h2 {
 
 .instance-form {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.form-hint {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.84rem;
 }
 
 .instance-form .button {

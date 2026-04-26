@@ -6,8 +6,9 @@ use uuid::Uuid;
 use crate::codex::{
     account_id_for_api_key, account_id_for_oauth, api_key_label, codex_cli_status,
     default_instance, extract_oauth_profile, instance_view, normalize_base_url,
-    parse_auth_file_from_path, resolve_launch_instance, slugify, spawn_codex_terminal,
-    upsert_account, windows_terminal_available, write_account_to_codex_home,
+    parse_auth_file_from_path, refresh_oauth_tokens, resolve_launch_instance, slugify,
+    spawn_codex_login, spawn_codex_terminal, sync_account_metadata_from_tokens, upsert_account,
+    windows_terminal_available, write_account_to_codex_home,
 };
 use crate::models::{
     AddApiKeyParams, AddTokenParams, AppState, CodexAccount, CodexAccountView, CodexAuthMode,
@@ -35,7 +36,16 @@ fn build_state() -> Result<AppState, String> {
     let data_dir = data_dir()?;
     fs::create_dir_all(&data_dir)
         .map_err(|err| format!("创建数据目录失败: {}, {}", data_dir.display(), err))?;
-    let store = load_store()?;
+    let mut store = load_store()?;
+    let mut store_changed = false;
+    for account in &mut store.accounts {
+        if sync_account_metadata_from_tokens(account) {
+            store_changed = true;
+        }
+    }
+    if store_changed {
+        save_store(&store)?;
+    }
     let mut instances = Vec::new();
     let default = default_instance(&store)?;
     instances.push(instance_view(&default, true));
@@ -58,6 +68,15 @@ fn build_state() -> Result<AppState, String> {
     })
 }
 
+fn import_account_from_home(home: &Path, label: Option<String>) -> Result<AppState, String> {
+    let account = parse_auth_file_from_path(&home.join("auth.json"), home, label)?;
+    let mut store = load_store()?;
+    let account = upsert_account(&mut store, account);
+    store.current_account_id = Some(account.id);
+    save_store(&store)?;
+    build_state()
+}
+
 #[tauri::command]
 pub fn get_app_state() -> Result<AppState, String> {
     build_state()
@@ -71,12 +90,39 @@ pub fn import_current_codex_account(
     let home = normalize_optional(codex_home)
         .map(PathBuf::from)
         .unwrap_or(default_codex_home()?);
-    let account = parse_auth_file_from_path(&home.join("auth.json"), &home, label)?;
-    let mut store = load_store()?;
-    let account = upsert_account(&mut store, account);
-    store.current_account_id = Some(account.id);
-    save_store(&store)?;
-    build_state()
+    import_account_from_home(&home, label)
+}
+
+#[tauri::command]
+pub fn start_codex_login(codex_home: Option<String>) -> Result<String, String> {
+    let home = match normalize_optional(codex_home) {
+        Some(path) => PathBuf::from(path),
+        None => data_dir()?
+            .join("login-homes")
+            .join(format!("login-{}", Uuid::new_v4().simple())),
+    };
+    spawn_codex_login(&home)?;
+    Ok(home.to_string_lossy().to_string())
+}
+
+#[allow(dead_code)]
+#[tauri::command]
+pub async fn login_and_import_codex_account(
+    codex_home: Option<String>,
+    label: Option<String>,
+) -> Result<AppState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = match normalize_optional(codex_home) {
+            Some(path) => PathBuf::from(path),
+            None => data_dir()?
+                .join("login-homes")
+                .join(format!("login-{}", Uuid::new_v4().simple())),
+        };
+        spawn_codex_login(&home)?;
+        import_account_from_home(&home, label)
+    })
+    .await
+    .map_err(|err| format!("登录任务失败: {}", err))?
 }
 
 #[tauri::command]
@@ -97,6 +143,7 @@ pub fn add_api_key_account(params: AddApiKeyParams) -> Result<AppState, String> 
         account_id: None,
         organization_id: None,
         plan_type: Some("API_KEY".to_string()),
+        subscription_active_until: None,
         tokens: None,
         quota: None,
         quota_error: None,
@@ -117,7 +164,7 @@ pub fn add_token_account(params: AddTokenParams) -> Result<AppState, String> {
         .ok_or_else(|| "id_token 不能为空".to_string())?;
     let access_token = normalize_optional_ref(Some(&params.access_token))
         .ok_or_else(|| "access_token 不能为空".to_string())?;
-    let (email, plan_type, extracted_account_id, organization_id) =
+    let (email, plan_type, extracted_account_id, organization_id, subscription_active_until) =
         extract_oauth_profile(&id_token, &access_token);
     let account_id = normalize_optional(params.account_id).or(extracted_account_id);
     let now = now_ts();
@@ -131,6 +178,7 @@ pub fn add_token_account(params: AddTokenParams) -> Result<AppState, String> {
         account_id: account_id.clone(),
         organization_id,
         plan_type,
+        subscription_active_until,
         tokens: Some(crate::models::CodexTokens {
             id_token,
             access_token,
@@ -377,39 +425,83 @@ pub fn get_instance_launch_command(instance_id: String) -> Result<String, String
     ))
 }
 
+fn write_quota_error(account: &mut CodexAccount, message: String) {
+    account.quota_error = Some(CodexQuotaErrorInfo {
+        message,
+        timestamp: now_ts(),
+    });
+    account.usage_updated_at = Some(now_ts());
+}
+
+fn write_quota_success(account: &mut CodexAccount, result: quota::QuotaFetchResult) {
+    account.quota = Some(result.quota);
+    account.quota_error = None;
+    account.usage_updated_at = Some(now_ts());
+    if result.plan_type.is_some() {
+        account.plan_type = result.plan_type;
+    }
+}
+
+async fn refresh_tokens_for_account(
+    account: &mut CodexAccount,
+    reason: &str,
+) -> Result<(), String> {
+    let tokens = account
+        .tokens
+        .as_ref()
+        .ok_or_else(|| format!("{}，该账号缺少 OAuth tokens，请重新登录并导入账号", reason))?;
+    let refresh_token = tokens
+        .refresh_token
+        .as_deref()
+        .and_then(|item| normalize_optional_ref(Some(item)))
+        .ok_or_else(|| format!("{}，该账号没有 refresh_token，请重新登录并导入账号", reason))?;
+    let account_id = account
+        .account_id
+        .clone()
+        .or_else(|| tokens.account_id.clone());
+    let mut next_tokens = refresh_oauth_tokens(&refresh_token, account_id.clone()).await?;
+    if next_tokens.account_id.is_none() {
+        next_tokens.account_id = account_id;
+    }
+    account.tokens = Some(next_tokens);
+    sync_account_metadata_from_tokens(account);
+    Ok(())
+}
+
+async fn refresh_quota_for_account(account: &mut CodexAccount) -> Result<(), String> {
+    match quota::fetch_quota(account).await {
+        Ok(result) => {
+            write_quota_success(account, result);
+            Ok(())
+        }
+        Err(err) if quota::should_refresh_token_after_error(&err) => {
+            refresh_tokens_for_account(account, "额度接口返回 token 失效").await?;
+            match quota::fetch_quota(account).await {
+                Ok(result) => {
+                    write_quota_success(account, result);
+                    Ok(())
+                }
+                Err(retry_err) => Err(retry_err),
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
 #[tauri::command]
 pub async fn refresh_account_quota(account_id: String) -> Result<AppState, String> {
     let mut store = load_store()?;
-    let account = store
+    let index = store
         .accounts
         .iter()
-        .find(|item| item.id == account_id)
-        .cloned()
+        .position(|item| item.id == account_id)
         .ok_or_else(|| format!("账号不存在: {}", account_id))?;
 
-    match quota::fetch_quota(&account).await {
-        Ok(result) => {
-            if let Some(target) = store.accounts.iter_mut().find(|item| item.id == account_id) {
-                target.quota = Some(result.quota);
-                target.quota_error = None;
-                target.usage_updated_at = Some(now_ts());
-                if result.plan_type.is_some() {
-                    target.plan_type = result.plan_type;
-                }
-            }
-        }
-        Err(err) => {
-            if let Some(target) = store.accounts.iter_mut().find(|item| item.id == account_id) {
-                target.quota_error = Some(CodexQuotaErrorInfo {
-                    message: err.clone(),
-                    timestamp: now_ts(),
-                });
-                target.usage_updated_at = Some(now_ts());
-            }
-            save_store(&store)?;
-            return build_state();
-        }
+    let mut account = store.accounts[index].clone();
+    if let Err(err) = refresh_quota_for_account(&mut account).await {
+        write_quota_error(&mut account, err);
     }
+    store.accounts[index] = account;
 
     save_store(&store)?;
     build_state()
@@ -419,27 +511,14 @@ pub async fn refresh_account_quota(account_id: String) -> Result<AppState, Strin
 pub async fn refresh_all_quotas() -> Result<AppState, String> {
     let mut store = load_store()?;
     for index in 0..store.accounts.len() {
-        let account = store.accounts[index].clone();
+        let mut account = store.accounts[index].clone();
         if account.auth_mode == CodexAuthMode::Apikey {
             continue;
         }
-        match quota::fetch_quota(&account).await {
-            Ok(result) => {
-                store.accounts[index].quota = Some(result.quota);
-                store.accounts[index].quota_error = None;
-                store.accounts[index].usage_updated_at = Some(now_ts());
-                if result.plan_type.is_some() {
-                    store.accounts[index].plan_type = result.plan_type;
-                }
-            }
-            Err(err) => {
-                store.accounts[index].quota_error = Some(CodexQuotaErrorInfo {
-                    message: err.clone(),
-                    timestamp: now_ts(),
-                });
-                store.accounts[index].usage_updated_at = Some(now_ts());
-            }
+        if let Err(err) = refresh_quota_for_account(&mut account).await {
+            write_quota_error(&mut account, err);
         }
+        store.accounts[index] = account;
     }
 
     save_store(&store)?;
