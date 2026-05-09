@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::api_channels::ApiChannelView;
+
 pub const DEFAULT_INSTANCE_ID: &str = "__default__";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -205,8 +207,11 @@ pub struct AppState {
     pub data_dir: String,
     pub default_codex_home: String,
     pub store_path: String,
+    pub api_channels_path: String,
     pub current_account_id: Option<String>,
+    pub current_api_channel_id: Option<String>,
     pub accounts: Vec<CodexAccountView>,
+    pub api_channels: Vec<ApiChannelView>,
     pub instances: Vec<CodexInstanceView>,
     pub codex_cli: CodexCliStatus,
     pub windows_terminal_available: bool,

@@ -314,6 +314,10 @@ h2 {
   border-bottom: 1px solid #e5ebe7;
 }
 
+.section-heading.compact {
+  padding-bottom: 10px;
+}
+
 .section-heading h2 {
   display: inline-flex;
   align-items: center;
@@ -374,7 +378,8 @@ h2 {
 }
 
 .inline-form,
-.instance-form {
+.instance-form,
+.api-channel-form {
   display: grid;
   grid-template-columns: minmax(0, 1.3fr) minmax(0, 0.8fr) auto auto;
   gap: 10px;
@@ -387,6 +392,25 @@ h2 {
 
 .instance-form {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.api-channel-panel {
+  padding-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-top: 1px solid #e4eae7;
+}
+
+.api-channel-form {
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr) minmax(0, 1fr) auto;
+}
+
+.api-channel-buttons {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .form-hint {
@@ -449,7 +473,8 @@ textarea:focus {
 }
 
 .account-list,
-.instance-list {
+.instance-list,
+.api-channel-list {
   display: flex;
   flex-direction: column;
   gap: 11px;
@@ -687,7 +712,8 @@ textarea:focus {
   }
 
   .inline-form,
-  .instance-form {
+  .instance-form,
+  .api-channel-form {
     grid-template-columns: 1fr;
   }
 }

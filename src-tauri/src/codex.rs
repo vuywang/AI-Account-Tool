@@ -279,7 +279,11 @@ fn read_api_base_url_from_config(codex_home: &Path) -> Option<String> {
         .map(|item| item.trim_end_matches('/').to_string())
 }
 
-fn write_api_provider_to_config(codex_home: &Path, account: &CodexAccount) -> Result<(), String> {
+fn write_openai_config(
+    codex_home: &Path,
+    base_url: Option<&str>,
+    force_openai_provider: bool,
+) -> Result<(), String> {
     let path = codex_home.join("config.toml");
     let existing = fs::read_to_string(&path).unwrap_or_default();
     let mut doc = if existing.trim().is_empty() {
@@ -290,24 +294,20 @@ fn write_api_provider_to_config(codex_home: &Path, account: &CodexAccount) -> Re
             .map_err(|err| format!("解析 config.toml 失败: {}", err))?
     };
 
-    if account.auth_mode == CodexAuthMode::Apikey {
-        let base_url = account
-            .api_base_url
-            .as_deref()
-            .map(|item| item.trim_end_matches('/').to_string())
-            .filter(|item| !item.is_empty() && item != DEFAULT_OPENAI_BASE_URL);
-        match base_url {
-            Some(url) => {
-                doc["openai_base_url"] = value(url);
-            }
-            None => {
-                let _ = doc.remove("openai_base_url");
-            }
+    if force_openai_provider {
+        doc["model_provider"] = value("openai");
+    }
+
+    match base_url
+        .map(|item| item.trim().trim_end_matches('/').to_string())
+        .filter(|item| !item.is_empty() && item != DEFAULT_OPENAI_BASE_URL)
+    {
+        Some(url) => {
+            doc["openai_base_url"] = value(url);
         }
-        let _ = doc.remove("model_provider");
-    } else {
-        let _ = doc.remove("openai_base_url");
-        let _ = doc.remove("model_provider");
+        None => {
+            let _ = doc.remove("openai_base_url");
+        }
     }
 
     if doc.to_string().trim().is_empty() && !path.exists() {
@@ -315,6 +315,19 @@ fn write_api_provider_to_config(codex_home: &Path, account: &CodexAccount) -> Re
     }
 
     write_string_atomic(&path, &doc.to_string())
+}
+
+fn write_api_provider_to_config(codex_home: &Path, account: &CodexAccount) -> Result<(), String> {
+    if account.auth_mode == CodexAuthMode::Apikey {
+        let base_url = account
+            .api_base_url
+            .as_deref()
+            .map(|item| item.trim_end_matches('/').to_string())
+            .filter(|item| !item.is_empty() && item != DEFAULT_OPENAI_BASE_URL);
+        return write_openai_config(codex_home, base_url.as_deref(), base_url.is_some());
+    } else {
+        return write_openai_config(codex_home, None, false);
+    }
 }
 
 fn build_auth_json(account: &CodexAccount) -> Result<Value, String> {
@@ -363,6 +376,26 @@ pub fn write_account_to_codex_home(
         .map_err(|err| format!("序列化 auth.json 失败: {}", err))?;
     write_string_atomic(&auth_path, &auth_content)?;
     write_api_provider_to_config(codex_home, account)
+}
+
+pub fn write_api_channel_to_codex_home(
+    codex_home: &Path,
+    api_key: &str,
+    base_url: &str,
+) -> Result<(), String> {
+    fs::create_dir_all(codex_home)
+        .map_err(|err| format!("创建 CODEX_HOME 失败: {}, {}", codex_home.display(), err))?;
+    let api_key = normalize_optional_ref(Some(api_key))
+        .ok_or_else(|| "API 中转缺少 OPENAI_API_KEY".to_string())?;
+    let base_url = normalize_optional_ref(Some(base_url))
+        .ok_or_else(|| "API 中转缺少 Base URL".to_string())?;
+    let auth_content = serde_json::to_string_pretty(&json!({
+        "auth_mode": "apikey",
+        "OPENAI_API_KEY": api_key,
+    }))
+    .map_err(|err| format!("序列化 auth.json 失败: {}", err))?;
+    write_string_atomic(&codex_home.join("auth.json"), &auth_content)?;
+    write_openai_config(codex_home, Some(&base_url), true)
 }
 
 pub fn parse_auth_file_from_path(

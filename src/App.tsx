@@ -67,12 +67,26 @@ type CodexInstance = {
   launchCommand: string;
 };
 
+type ApiChannel = {
+  id: string;
+  name: string;
+  baseUrl: string;
+  keyPreview: string;
+  hasApiKey: boolean;
+  createdAt: number;
+  updatedAt: number;
+  lastUsed?: number | null;
+};
+
 type AppState = {
   dataDir: string;
   defaultCodexHome: string;
   storePath: string;
+  apiChannelsPath: string;
   currentAccountId?: string | null;
+  currentApiChannelId?: string | null;
   accounts: CodexAccount[];
+  apiChannels: ApiChannel[];
   instances: CodexInstance[];
   codexCli: {
     path?: string | null;
@@ -105,6 +119,12 @@ type InstanceForm = {
   bindAccountId: string;
 };
 
+type ApiChannelForm = {
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+};
+
 const emptyApiKeyForm: ApiKeyForm = {
   label: "",
   email: "",
@@ -126,6 +146,12 @@ const emptyInstanceForm: InstanceForm = {
   workingDir: "",
   extraArgs: "",
   bindAccountId: "",
+};
+
+const emptyApiChannelForm: ApiChannelForm = {
+  name: "",
+  baseUrl: "",
+  apiKey: "",
 };
 
 function formatDate(timestamp?: number | null) {
@@ -272,12 +298,23 @@ export default function App() {
   const [apiKeyForm, setApiKeyForm] = useState<ApiKeyForm>(emptyApiKeyForm);
   const [tokenForm, setTokenForm] = useState<TokenForm>(emptyTokenForm);
   const [instanceForm, setInstanceForm] = useState<InstanceForm>(emptyInstanceForm);
+  const [apiChannelForm, setApiChannelForm] = useState<ApiChannelForm>(emptyApiChannelForm);
+  const [editingApiChannelId, setEditingApiChannelId] = useState<string | null>(null);
   const loginPollRef = useRef<number | null>(null);
 
   const currentAccount = useMemo(
     () => state?.accounts.find((account) => account.id === state.currentAccountId) ?? null,
     [state],
   );
+  const currentApiChannel = useMemo(
+    () => state?.apiChannels.find((channel) => channel.id === state.currentApiChannelId) ?? null,
+    [state],
+  );
+  const currentIdentityLabel = currentApiChannel
+    ? `API 中转：${currentApiChannel.name}`
+    : currentAccount
+      ? currentAccount.label
+      : "未选择";
 
   async function runAction<T>(label: string, action: () => Promise<T>, success?: string) {
     setBusy(label);
@@ -398,6 +435,81 @@ export default function App() {
       },
       "已添加 OAuth Token 账号",
     );
+  }
+
+  async function saveApiChannel(event: FormEvent) {
+    event.preventDefault();
+    if (editingApiChannelId) {
+      await runAction(
+        `update-api-channel-${editingApiChannelId}`,
+        async () => {
+          const next = await invoke<AppState>("update_api_channel", {
+            params: {
+              channelId: editingApiChannelId,
+              name: apiChannelForm.name,
+              baseUrl: apiChannelForm.baseUrl,
+              apiKey: apiChannelForm.apiKey || null,
+            },
+          });
+          setState(next);
+          setApiChannelForm(emptyApiChannelForm);
+          setEditingApiChannelId(null);
+        },
+        "已更新 API 中转",
+      );
+      return;
+    }
+
+    await runAction(
+      "add-api-channel",
+      async () => {
+        const next = await invoke<AppState>("add_api_channel", { params: apiChannelForm });
+        setState(next);
+        setApiChannelForm(emptyApiChannelForm);
+      },
+      "已保存 API 中转",
+    );
+  }
+
+  function editApiChannel(channel: ApiChannel) {
+    setEditingApiChannelId(channel.id);
+    setApiChannelForm({
+      name: channel.name,
+      baseUrl: channel.baseUrl,
+      apiKey: "",
+    });
+  }
+
+  function cancelApiChannelEdit() {
+    setEditingApiChannelId(null);
+    setApiChannelForm(emptyApiChannelForm);
+  }
+
+  async function switchApiChannel(channel: ApiChannel) {
+    await runAction(
+      `switch-api-channel-${channel.id}`,
+      async () => {
+        const next = await invoke<AppState>("switch_api_channel", {
+          channelId: channel.id,
+          codexHome: null,
+        });
+        setState(next);
+      },
+      `已切换到 API 中转 ${channel.name}`,
+    );
+  }
+
+  async function deleteApiChannel(channel: ApiChannel) {
+    if (!window.confirm(`删除 API 中转 ${channel.name}？已写入 Codex 的 auth.json/config.toml 不会被自动还原。`)) {
+      return;
+    }
+    await runAction(`delete-api-channel-${channel.id}`, async () => {
+      const next = await invoke<AppState>("delete_api_channel", { channelId: channel.id });
+      setState(next);
+      if (editingApiChannelId === channel.id) {
+        cancelApiChannelEdit();
+      }
+    });
   }
 
   async function createInstance(event: FormEvent) {
@@ -564,8 +676,8 @@ export default function App() {
 
       <section className="status-band">
         <div>
-          <span>当前账号</span>
-          <strong>{currentAccount ? currentAccount.label : "未选择"}</strong>
+          <span>当前使用</span>
+          <strong>{currentIdentityLabel}</strong>
         </div>
         <div>
           <span>默认 CODEX_HOME</span>
@@ -664,6 +776,106 @@ export default function App() {
               </article>
             ))}
           </div>
+
+          <section className="api-channel-panel">
+            <div className="section-heading compact">
+              <div>
+                <h2>API 中转</h2>
+                <p>保存 URL 和 API Key，一键写入默认 CODEX_HOME。</p>
+              </div>
+              <div className="heading-actions">
+                <button
+                  className="button small ghost"
+                  onClick={() => copyText(state.apiChannelsPath, "API 中转文件路径已复制")}
+                  type="button"
+                >
+                  <Copy size={13} /> 复制路径
+                </button>
+                <span className="count">{state.apiChannels.length}</span>
+              </div>
+            </div>
+
+            <form className="api-channel-form" onSubmit={saveApiChannel}>
+              <label>
+                <span>名称</span>
+                <input
+                  value={apiChannelForm.name}
+                  onChange={(event) => setApiChannelForm({ ...apiChannelForm, name: event.target.value })}
+                  placeholder="inroi"
+                  required
+                />
+              </label>
+              <label>
+                <span>Base URL</span>
+                <input
+                  value={apiChannelForm.baseUrl}
+                  onChange={(event) => setApiChannelForm({ ...apiChannelForm, baseUrl: event.target.value })}
+                  placeholder="https://www.inroi.shop"
+                  required
+                />
+              </label>
+              <label>
+                <span>API Key</span>
+                <input
+                  value={apiChannelForm.apiKey}
+                  onChange={(event) => setApiChannelForm({ ...apiChannelForm, apiKey: event.target.value })}
+                  type="password"
+                  placeholder={editingApiChannelId ? "留空则保留原 Key" : "sk-..."}
+                  required={!editingApiChannelId}
+                />
+              </label>
+              <div className="api-channel-buttons">
+                <button className="button primary">
+                  <Plus size={16} /> {editingApiChannelId ? "更新中转" : "保存中转"}
+                </button>
+                {editingApiChannelId && (
+                  <button type="button" className="button ghost" onClick={cancelApiChannelEdit}>
+                    取消
+                  </button>
+                )}
+              </div>
+              <p className="form-hint">
+                切换时会写入 auth.json，并在 config.toml 中设置 model_provider = "openai" 与 openai_base_url。
+              </p>
+            </form>
+
+            <div className="api-channel-list">
+              {state.apiChannels.length === 0 && (
+                <div className="empty-state">
+                  <KeyRound size={20} />
+                  <p>还没有 API 中转。先保存一个 URL 和 API Key，之后就可以一键切换。</p>
+                </div>
+              )}
+              {state.apiChannels.map((channel) => (
+                <article className="list-row" key={channel.id}>
+                  <div className="row-main">
+                    <div className="row-title">
+                      <strong>{channel.name}</strong>
+                      {state.currentApiChannelId === channel.id && (
+                        <span className="pill active"><CircleCheck size={13} /> 当前</span>
+                      )}
+                      <span className="pill">openai</span>
+                    </div>
+                    <p>{channel.baseUrl}</p>
+                    <small>
+                      Key {channel.keyPreview} · 最近使用 {formatDate(channel.lastUsed)}
+                    </small>
+                  </div>
+                  <div className="row-actions">
+                    <button className="button small primary" onClick={() => switchApiChannel(channel)}>
+                      切换
+                    </button>
+                    <button className="button small ghost" onClick={() => editApiChannel(channel)}>
+                      编辑
+                    </button>
+                    <button className="button small danger" onClick={() => deleteApiChannel(channel)}>
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
 
           <details className="form-disclosure">
             <summary>添加 API Key 账号</summary>

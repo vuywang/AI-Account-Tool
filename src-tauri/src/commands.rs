@@ -3,12 +3,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use uuid::Uuid;
 
+use crate::api_channels::{
+    add_api_channel as add_api_channel_to_store, api_channels_path, clear_current_api_channel,
+    delete_api_channel as delete_api_channel_from_store, get_api_channel, load_api_channel_store,
+    mark_api_channel_used, save_api_channel_store,
+    update_api_channel as update_api_channel_in_store, AddApiChannelParams, UpdateApiChannelParams,
+};
 use crate::codex::{
     account_id_for_api_key, account_id_for_oauth, api_key_label, codex_cli_status,
     default_instance, extract_oauth_profile, instance_view, normalize_base_url,
     parse_auth_file_from_path, refresh_oauth_tokens, resolve_launch_instance, slugify,
     spawn_codex_login, spawn_codex_terminal, sync_account_metadata_from_tokens, upsert_account,
-    windows_terminal_available, write_account_to_codex_home,
+    windows_terminal_available, write_account_to_codex_home, write_api_channel_to_codex_home,
 };
 use crate::models::{
     AddApiKeyParams, AddTokenParams, AppState, CodexAccount, CodexAccountView, CodexAuthMode,
@@ -37,6 +43,7 @@ fn build_state() -> Result<AppState, String> {
     fs::create_dir_all(&data_dir)
         .map_err(|err| format!("创建数据目录失败: {}, {}", data_dir.display(), err))?;
     let mut store = load_store()?;
+    let api_channel_store = load_api_channel_store()?;
     let mut store_changed = false;
     for account in &mut store.accounts {
         if sync_account_metadata_from_tokens(account) {
@@ -60,8 +67,15 @@ fn build_state() -> Result<AppState, String> {
         data_dir: data_dir.to_string_lossy().to_string(),
         default_codex_home: default_codex_home()?.to_string_lossy().to_string(),
         store_path: store_path()?.to_string_lossy().to_string(),
+        api_channels_path: api_channels_path()?.to_string_lossy().to_string(),
         current_account_id: store.current_account_id.clone(),
+        current_api_channel_id: api_channel_store.current_channel_id.clone(),
         accounts: store.accounts.iter().map(CodexAccountView::from).collect(),
+        api_channels: api_channel_store
+            .channels
+            .iter()
+            .map(crate::api_channels::ApiChannelView::from)
+            .collect(),
         instances,
         codex_cli: codex_cli_status(),
         windows_terminal_available: windows_terminal_available(),
@@ -199,6 +213,50 @@ pub fn add_token_account(params: AddTokenParams) -> Result<AppState, String> {
 }
 
 #[tauri::command]
+pub fn add_api_channel(params: AddApiChannelParams) -> Result<AppState, String> {
+    let mut store = load_api_channel_store()?;
+    add_api_channel_to_store(&mut store, params)?;
+    save_api_channel_store(&store)?;
+    build_state()
+}
+
+#[tauri::command]
+pub fn update_api_channel(params: UpdateApiChannelParams) -> Result<AppState, String> {
+    let mut store = load_api_channel_store()?;
+    update_api_channel_in_store(&mut store, params)?;
+    save_api_channel_store(&store)?;
+    build_state()
+}
+
+#[tauri::command]
+pub fn delete_api_channel(channel_id: String) -> Result<AppState, String> {
+    let mut store = load_api_channel_store()?;
+    delete_api_channel_from_store(&mut store, &channel_id)?;
+    save_api_channel_store(&store)?;
+    build_state()
+}
+
+#[tauri::command]
+pub fn switch_api_channel(
+    channel_id: String,
+    codex_home: Option<String>,
+) -> Result<AppState, String> {
+    let mut api_store = load_api_channel_store()?;
+    let channel = get_api_channel(&api_store, &channel_id)?;
+    let home = normalize_optional(codex_home)
+        .map(PathBuf::from)
+        .unwrap_or(default_codex_home()?);
+    write_api_channel_to_codex_home(&home, &channel.api_key, &channel.base_url)?;
+    mark_api_channel_used(&mut api_store, &channel_id)?;
+    save_api_channel_store(&api_store)?;
+
+    let mut store = load_store()?;
+    store.current_account_id = None;
+    save_store(&store)?;
+    build_state()
+}
+
+#[tauri::command]
 pub fn switch_account(account_id: String, codex_home: Option<String>) -> Result<AppState, String> {
     let mut store = load_store()?;
     let home = normalize_optional(codex_home)
@@ -211,6 +269,9 @@ pub fn switch_account(account_id: String, codex_home: Option<String>) -> Result<
     }
     store.current_account_id = Some(account_id);
     save_store(&store)?;
+    let mut api_store = load_api_channel_store()?;
+    clear_current_api_channel(&mut api_store);
+    save_api_channel_store(&api_store)?;
     build_state()
 }
 

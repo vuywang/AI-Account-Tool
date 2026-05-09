@@ -1,3 +1,4 @@
+mod api_channels;
 mod codex;
 mod commands;
 mod models;
@@ -13,6 +14,10 @@ pub fn run() {
             commands::start_codex_login,
             commands::add_api_key_account,
             commands::add_token_account,
+            commands::add_api_channel,
+            commands::update_api_channel,
+            commands::delete_api_channel,
+            commands::switch_api_channel,
             commands::switch_account,
             commands::delete_account,
             commands::update_account_label,
