@@ -4,35 +4,14 @@ import {
   Copy,
   FolderOpen,
   KeyRound,
-  Play,
   Plus,
   RefreshCcw,
-  Terminal,
   Trash2,
   UserRound,
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type AuthMode = "oauth" | "apikey";
-
-type CodexAccount = {
-  id: string;
-  label: string;
-  email: string;
-  authMode: AuthMode;
-  apiBaseUrl?: string | null;
-  accountId?: string | null;
-  organizationId?: string | null;
-  planType?: string | null;
-  subscriptionActiveUntil?: number | null;
-  hasApiKey: boolean;
-  hasRefreshToken: boolean;
-  quota?: CodexQuota | null;
-  quotaError?: CodexQuotaError | null;
-  usageUpdatedAt?: number | null;
-  createdAt: number;
-  lastUsed: number;
-};
 
 type CodexQuota = {
   hourlyPercentage: number;
@@ -51,20 +30,23 @@ type CodexQuotaError = {
   timestamp: number;
 };
 
-type CodexInstance = {
+type CodexAccount = {
   id: string;
-  name: string;
-  codexHome: string;
-  workingDir?: string | null;
-  extraArgs: string;
-  bindAccountId?: string | null;
+  label: string;
+  email: string;
+  authMode: AuthMode;
+  apiBaseUrl?: string | null;
+  accountId?: string | null;
+  organizationId?: string | null;
+  planType?: string | null;
+  subscriptionActiveUntil?: number | null;
+  hasApiKey: boolean;
+  hasRefreshToken: boolean;
+  quota?: CodexQuota | null;
+  quotaError?: CodexQuotaError | null;
+  usageUpdatedAt?: number | null;
   createdAt: number;
-  lastLaunchedAt?: number | null;
-  lastPid?: number | null;
-  running: boolean;
-  initialized: boolean;
-  isDefault: boolean;
-  launchCommand: string;
+  lastUsed: number;
 };
 
 type ApiChannel = {
@@ -87,7 +69,6 @@ type AppState = {
   currentApiChannelId?: string | null;
   accounts: CodexAccount[];
   apiChannels: ApiChannel[];
-  instances: CodexInstance[];
   codexCli: {
     path?: string | null;
     version?: string | null;
@@ -96,56 +77,10 @@ type AppState = {
   windowsTerminalAvailable: boolean;
 };
 
-type ApiKeyForm = {
-  label: string;
-  email: string;
-  apiKey: string;
-  apiBaseUrl: string;
-};
-
-type TokenForm = {
-  label: string;
-  idToken: string;
-  accessToken: string;
-  refreshToken: string;
-  accountId: string;
-};
-
-type InstanceForm = {
-  name: string;
-  codexHome: string;
-  workingDir: string;
-  extraArgs: string;
-  bindAccountId: string;
-};
-
 type ApiChannelForm = {
   name: string;
   baseUrl: string;
   apiKey: string;
-};
-
-const emptyApiKeyForm: ApiKeyForm = {
-  label: "",
-  email: "",
-  apiKey: "",
-  apiBaseUrl: "",
-};
-
-const emptyTokenForm: TokenForm = {
-  label: "",
-  idToken: "",
-  accessToken: "",
-  refreshToken: "",
-  accountId: "",
-};
-
-const emptyInstanceForm: InstanceForm = {
-  name: "",
-  codexHome: "",
-  workingDir: "",
-  extraArgs: "",
-  bindAccountId: "",
 };
 
 const emptyApiChannelForm: ApiChannelForm = {
@@ -155,7 +90,7 @@ const emptyApiChannelForm: ApiChannelForm = {
 };
 
 function formatDate(timestamp?: number | null) {
-  if (!timestamp) return "尚未启动";
+  if (!timestamp) return "尚未使用";
   return new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",
     day: "2-digit",
@@ -205,8 +140,8 @@ function authLabel(mode: AuthMode) {
 
 function compactPath(path?: string | null) {
   if (!path) return "未设置";
-  if (path.length < 58) return path;
-  return `${path.slice(0, 22)}...${path.slice(-28)}`;
+  if (path.length < 62) return path;
+  return `${path.slice(0, 24)}...${path.slice(-30)}`;
 }
 
 function QuotaMeter({
@@ -233,7 +168,9 @@ function QuotaMeter({
       <div className="quota-track">
         <div style={{ width: `${Math.max(0, Math.min(100, displayValue))}%` }} />
       </div>
-      <small>{windowLabel(windowMinutes, fallbackWindow)} · 重置 {formatReset(reset)}</small>
+      <small>
+        {windowLabel(windowMinutes, fallbackWindow)} · 重置 {formatReset(reset)}
+      </small>
     </div>
   );
 }
@@ -293,11 +230,6 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [importHome, setImportHome] = useState("");
-  const [importLabel, setImportLabel] = useState("");
-  const [apiKeyForm, setApiKeyForm] = useState<ApiKeyForm>(emptyApiKeyForm);
-  const [tokenForm, setTokenForm] = useState<TokenForm>(emptyTokenForm);
-  const [instanceForm, setInstanceForm] = useState<InstanceForm>(emptyInstanceForm);
   const [apiChannelForm, setApiChannelForm] = useState<ApiChannelForm>(emptyApiChannelForm);
   const [editingApiChannelId, setEditingApiChannelId] = useState<string | null>(null);
   const loginPollRef = useRef<number | null>(null);
@@ -311,7 +243,7 @@ export default function App() {
     [state],
   );
   const currentIdentityLabel = currentApiChannel
-    ? `API 中转：${currentApiChannel.name}`
+    ? `API 中转 · ${currentApiChannel.name}`
     : currentAccount
       ? currentAccount.label
       : "未选择";
@@ -344,7 +276,7 @@ export default function App() {
     }
   }
 
-  function watchLoginImport(codexHome: string, label: string | null) {
+  function watchLoginImport(codexHome: string) {
     clearLoginPoll();
     let importing = false;
 
@@ -354,15 +286,14 @@ export default function App() {
       try {
         const next = await invoke<AppState>("import_current_codex_account", {
           codexHome,
-          label,
+          label: null,
         });
         setState(next);
-        setImportLabel("");
         setError(null);
         setMessage("登录完成，已自动导入账号");
         clearLoginPoll();
       } catch {
-        // 登录可能还在浏览器里进行中；失败不打扰界面，继续等 auth.json。
+        // 登录可能还在浏览器里进行中，继续等待 auth.json。
       } finally {
         importing = false;
       }
@@ -380,61 +311,28 @@ export default function App() {
 
   useEffect(() => () => clearLoginPoll(), []);
 
-  async function importLocal(event: FormEvent) {
-    event.preventDefault();
+  async function importLocal() {
     await runAction(
       "import",
       async () => {
         const next = await invoke<AppState>("import_current_codex_account", {
-          codexHome: importHome || null,
-          label: importLabel || null,
+          codexHome: null,
+          label: null,
         });
         setState(next);
-        setImportLabel("");
       },
-      "已从 auth.json 导入账号",
+      "已从默认 auth.json 导入账号",
     );
   }
 
   async function loginAndImport() {
-    await runAction(
-      "login-import",
-      async () => {
-        const label = importLabel || null;
-        const loginHome = await invoke<string>("start_codex_login", {
-          codexHome: importHome || null,
-        });
-        setImportHome(loginHome);
-        setMessage("已打开 Codex 登录，登录成功后会自动导入账号");
-        watchLoginImport(loginHome, label);
-      },
-    );
-  }
-
-  async function addApiKey(event: FormEvent) {
-    event.preventDefault();
-    await runAction(
-      "add-api-key",
-      async () => {
-        const next = await invoke<AppState>("add_api_key_account", { params: apiKeyForm });
-        setState(next);
-        setApiKeyForm(emptyApiKeyForm);
-      },
-      "已添加 API Key 账号",
-    );
-  }
-
-  async function addToken(event: FormEvent) {
-    event.preventDefault();
-    await runAction(
-      "add-token",
-      async () => {
-        const next = await invoke<AppState>("add_token_account", { params: tokenForm });
-        setState(next);
-        setTokenForm(emptyTokenForm);
-      },
-      "已添加 OAuth Token 账号",
-    );
+    await runAction("login-import", async () => {
+      const loginHome = await invoke<string>("start_codex_login", {
+        codexHome: null,
+      });
+      setMessage("已打开 Codex 登录，登录成功后会自动导入账号");
+      watchLoginImport(loginHome);
+    });
   }
 
   async function saveApiChannel(event: FormEvent) {
@@ -512,27 +410,6 @@ export default function App() {
     });
   }
 
-  async function createInstance(event: FormEvent) {
-    event.preventDefault();
-    await runAction(
-      "create-instance",
-      async () => {
-        const next = await invoke<AppState>("create_instance", {
-          params: {
-            name: instanceForm.name,
-            codexHome: instanceForm.codexHome || null,
-            workingDir: instanceForm.workingDir || null,
-            extraArgs: instanceForm.extraArgs || null,
-            bindAccountId: instanceForm.bindAccountId || null,
-          },
-        });
-        setState(next);
-        setInstanceForm(emptyInstanceForm);
-      },
-      "已创建 Codex 实例",
-    );
-  }
-
   async function switchAccount(account: CodexAccount) {
     await runAction(
       `switch-${account.id}`,
@@ -595,32 +472,6 @@ export default function App() {
     );
   }
 
-  async function launchInstance(instance: CodexInstance) {
-    await runAction(
-      `launch-${instance.id}`,
-      async () => {
-        await invoke("launch_instance", { instanceId: instance.id });
-        await refresh();
-      },
-      `已启动 ${instance.name}`,
-    );
-  }
-
-  async function stopInstance(instance: CodexInstance) {
-    await runAction(`stop-${instance.id}`, async () => {
-      const next = await invoke<AppState>("stop_instance", { instanceId: instance.id });
-      setState(next);
-    });
-  }
-
-  async function deleteInstance(instance: CodexInstance) {
-    if (!window.confirm(`删除实例 ${instance.name}？实例目录不会被删除。`)) return;
-    await runAction(`delete-instance-${instance.id}`, async () => {
-      const next = await invoke<AppState>("delete_instance", { instanceId: instance.id });
-      setState(next);
-    });
-  }
-
   async function openPath(path: string) {
     await runAction("open-path", () => invoke("open_path", { path }));
   }
@@ -650,55 +501,51 @@ export default function App() {
 
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <img src="/codex.svg" alt="Codex" />
-          <div>
-            <h1>AI Account Tool</h1>
-            <p>Codex 账号和 Windows 多实例</p>
+      <div className="shell-inner">
+        <header className="topbar">
+          <div className="brand">
+            <img src="/codex.svg" alt="Codex" />
+            <div>
+              <h1>AI Account Tool</h1>
+              <p>Codex 账号与 API 中转切换</p>
+            </div>
           </div>
-        </div>
-        <div className="topbar-actions">
-          <button className="button ghost" onClick={() => openPath(state.dataDir)}>
-            <FolderOpen size={16} /> 数据目录
-          </button>
-          <button className="button ghost" onClick={() => runAction("refresh", refresh)}>
-            <RefreshCcw size={16} /> 刷新
-          </button>
-        </div>
-      </header>
+          <div className="topbar-actions">
+            <button className="button ghost" onClick={() => openPath(state.dataDir)}>
+              <FolderOpen size={16} /> 数据目录
+            </button>
+            <button className="button ghost" onClick={() => runAction("refresh", refresh)}>
+              <RefreshCcw size={16} /> 刷新
+            </button>
+          </div>
+        </header>
 
-      {(message || error) && (
-        <div className={`notice ${error ? "error" : "ok"}`}>
-          {error ? error : message}
-        </div>
-      )}
+        {(message || error) && (
+          <div className={`notice ${error ? "error" : "ok"}`}>
+            {error ? error : message}
+          </div>
+        )}
 
-      <section className="status-band">
-        <div>
-          <span>当前使用</span>
-          <strong>{currentIdentityLabel}</strong>
-        </div>
-        <div>
-          <span>默认 CODEX_HOME</span>
-          <strong title={state.defaultCodexHome}>{compactPath(state.defaultCodexHome)}</strong>
-        </div>
-        <div>
-          <span>Codex CLI</span>
-          <strong>{state.codexCli.version ?? "未检测到"}</strong>
-        </div>
-        <div>
-          <span>终端</span>
-          <strong>{state.windowsTerminalAvailable ? "Windows Terminal" : "cmd.exe"}</strong>
-        </div>
-      </section>
+        <section className="status-band">
+          <div>
+            <span>当前使用</span>
+            <strong>{currentIdentityLabel}</strong>
+          </div>
+          <div>
+            <span>默认 CODEX_HOME</span>
+            <strong title={state.defaultCodexHome}>{compactPath(state.defaultCodexHome)}</strong>
+          </div>
+          <div>
+            <span>Codex CLI</span>
+            <strong>{state.codexCli.version ?? "未检测到"}</strong>
+          </div>
+        </section>
 
-      <div className="workspace-grid">
         <section className="workspace-section accounts-section">
           <div className="section-heading">
             <div>
               <h2>账号</h2>
-              <p>从现有 Codex 登录导入，或保存 API Key / OAuth Token。</p>
+              <p>导入 Codex 登录账号，查看额度并一键切换。</p>
             </div>
             <div className="heading-actions">
               <button className="button small ghost" onClick={refreshAllQuotas} disabled={busy === "quota-all"}>
@@ -708,41 +555,27 @@ export default function App() {
             </div>
           </div>
 
-          <form className="inline-form" onSubmit={importLocal}>
-            <label>
-              <span>CODEX_HOME</span>
-              <input
-                value={importHome}
-                onChange={(event) => setImportHome(event.target.value)}
-                placeholder={state.defaultCodexHome}
-              />
-            </label>
-            <label>
-              <span>名称</span>
-              <input
-                value={importLabel}
-                onChange={(event) => setImportLabel(event.target.value)}
-                placeholder="可选"
-              />
-            </label>
-            <button className="button primary" disabled={busy === "import"}>
+          <div className="quick-actions">
+            <button className="button primary" onClick={importLocal} disabled={busy === "import"}>
               <UserRound size={16} /> 导入本机账号
             </button>
-            <button type="button" className="button primary" onClick={loginAndImport} disabled={busy === "login-import"}>
+            <button className="button primary" onClick={loginAndImport} disabled={busy === "login-import"}>
               <UserRound size={16} /> 登录并导入
             </button>
-            <p className="form-hint">留空 CODEX_HOME 时会使用独立登录目录，登录成功后自动保存 refresh_token。</p>
-          </form>
+          </div>
 
           <div className="account-list">
             {state.accounts.length === 0 && (
               <div className="empty-state">
                 <KeyRound size={20} />
-                <p>还没有保存账号。先导入默认 `auth.json`，或者添加一个 API Key。</p>
+                <p>还没有保存账号。可以先导入本机账号，或登录后自动导入。</p>
               </div>
             )}
             {state.accounts.map((account) => (
-              <article className="list-row" key={account.id}>
+              <article
+                className={`list-row account-row ${state.currentAccountId === account.id ? "selected" : ""}`}
+                key={account.id}
+              >
                 <div className="row-main">
                   <div className="row-title">
                     <strong>{account.label}</strong>
@@ -776,270 +609,108 @@ export default function App() {
               </article>
             ))}
           </div>
-
-          <section className="api-channel-panel">
-            <div className="section-heading compact">
-              <div>
-                <h2>API 中转</h2>
-                <p>保存 URL 和 API Key，一键写入默认 CODEX_HOME。</p>
-              </div>
-              <div className="heading-actions">
-                <button
-                  className="button small ghost"
-                  onClick={() => copyText(state.apiChannelsPath, "API 中转文件路径已复制")}
-                  type="button"
-                >
-                  <Copy size={13} /> 复制路径
-                </button>
-                <span className="count">{state.apiChannels.length}</span>
-              </div>
-            </div>
-
-            <form className="api-channel-form" onSubmit={saveApiChannel}>
-              <label>
-                <span>名称</span>
-                <input
-                  value={apiChannelForm.name}
-                  onChange={(event) => setApiChannelForm({ ...apiChannelForm, name: event.target.value })}
-                  placeholder="inroi"
-                  required
-                />
-              </label>
-              <label>
-                <span>Base URL</span>
-                <input
-                  value={apiChannelForm.baseUrl}
-                  onChange={(event) => setApiChannelForm({ ...apiChannelForm, baseUrl: event.target.value })}
-                  placeholder="https://www.inroi.shop"
-                  required
-                />
-              </label>
-              <label>
-                <span>API Key</span>
-                <input
-                  value={apiChannelForm.apiKey}
-                  onChange={(event) => setApiChannelForm({ ...apiChannelForm, apiKey: event.target.value })}
-                  type="password"
-                  placeholder={editingApiChannelId ? "留空则保留原 Key" : "sk-..."}
-                  required={!editingApiChannelId}
-                />
-              </label>
-              <div className="api-channel-buttons">
-                <button className="button primary">
-                  <Plus size={16} /> {editingApiChannelId ? "更新中转" : "保存中转"}
-                </button>
-                {editingApiChannelId && (
-                  <button type="button" className="button ghost" onClick={cancelApiChannelEdit}>
-                    取消
-                  </button>
-                )}
-              </div>
-              <p className="form-hint">
-                切换时会写入 auth.json，并在 config.toml 中设置 model_provider = "openai" 与 openai_base_url。
-              </p>
-            </form>
-
-            <div className="api-channel-list">
-              {state.apiChannels.length === 0 && (
-                <div className="empty-state">
-                  <KeyRound size={20} />
-                  <p>还没有 API 中转。先保存一个 URL 和 API Key，之后就可以一键切换。</p>
-                </div>
-              )}
-              {state.apiChannels.map((channel) => (
-                <article className="list-row" key={channel.id}>
-                  <div className="row-main">
-                    <div className="row-title">
-                      <strong>{channel.name}</strong>
-                      {state.currentApiChannelId === channel.id && (
-                        <span className="pill active"><CircleCheck size={13} /> 当前</span>
-                      )}
-                      <span className="pill">openai</span>
-                    </div>
-                    <p>{channel.baseUrl}</p>
-                    <small>
-                      Key {channel.keyPreview} · 最近使用 {formatDate(channel.lastUsed)}
-                    </small>
-                  </div>
-                  <div className="row-actions">
-                    <button className="button small primary" onClick={() => switchApiChannel(channel)}>
-                      切换
-                    </button>
-                    <button className="button small ghost" onClick={() => editApiChannel(channel)}>
-                      编辑
-                    </button>
-                    <button className="button small danger" onClick={() => deleteApiChannel(channel)}>
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          </section>
-
-          <details className="form-disclosure">
-            <summary>添加 API Key 账号</summary>
-            <form className="stack-form" onSubmit={addApiKey}>
-              <label>
-                <span>名称</span>
-                <input value={apiKeyForm.label} onChange={(event) => setApiKeyForm({ ...apiKeyForm, label: event.target.value })} placeholder="工作账号" />
-              </label>
-              <label>
-                <span>显示邮箱</span>
-                <input value={apiKeyForm.email} onChange={(event) => setApiKeyForm({ ...apiKeyForm, email: event.target.value })} placeholder="可选" />
-              </label>
-              <label>
-                <span>OPENAI_API_KEY</span>
-                <input value={apiKeyForm.apiKey} onChange={(event) => setApiKeyForm({ ...apiKeyForm, apiKey: event.target.value })} type="password" required />
-              </label>
-              <label>
-                <span>Base URL</span>
-                <input value={apiKeyForm.apiBaseUrl} onChange={(event) => setApiKeyForm({ ...apiKeyForm, apiBaseUrl: event.target.value })} placeholder="https://api.openai.com/v1" />
-              </label>
-              <button className="button primary"><Plus size={16} /> 保存 API Key</button>
-            </form>
-          </details>
-
-          <details className="form-disclosure">
-            <summary>手动添加 OAuth Token</summary>
-            <form className="stack-form" onSubmit={addToken}>
-              <label>
-                <span>名称</span>
-                <input value={tokenForm.label} onChange={(event) => setTokenForm({ ...tokenForm, label: event.target.value })} placeholder="可选" />
-              </label>
-              <label>
-                <span>id_token</span>
-                <textarea value={tokenForm.idToken} onChange={(event) => setTokenForm({ ...tokenForm, idToken: event.target.value })} required />
-              </label>
-              <label>
-                <span>access_token</span>
-                <textarea value={tokenForm.accessToken} onChange={(event) => setTokenForm({ ...tokenForm, accessToken: event.target.value })} required />
-              </label>
-              <label>
-                <span>refresh_token</span>
-                <textarea value={tokenForm.refreshToken} onChange={(event) => setTokenForm({ ...tokenForm, refreshToken: event.target.value })} />
-              </label>
-              <label>
-                <span>account_id</span>
-                <input value={tokenForm.accountId} onChange={(event) => setTokenForm({ ...tokenForm, accountId: event.target.value })} placeholder="可选" />
-              </label>
-              <button className="button primary"><Plus size={16} /> 保存 Token</button>
-            </form>
-          </details>
         </section>
 
-        <section className="workspace-section instances-section">
+        <section className="workspace-section api-channel-section">
           <div className="section-heading">
             <div>
-              <h2>实例</h2>
-              <p>每个实例使用独立 CODEX_HOME，可绑定不同账号并行启动。</p>
+              <h2>API 中转</h2>
+              <p>保存 URL 和 API Key，切换时自动写入默认 CODEX_HOME。</p>
             </div>
-            <span className="count">{state.instances.length}</span>
+            <div className="heading-actions">
+              <button
+                className="button small ghost"
+                onClick={() => copyText(state.apiChannelsPath, "API 中转文件路径已复制")}
+                type="button"
+              >
+                <Copy size={13} /> 复制路径
+              </button>
+              <span className="count">{state.apiChannels.length}</span>
+            </div>
           </div>
 
-          <form className="instance-form" onSubmit={createInstance}>
+          <form className="api-channel-form" onSubmit={saveApiChannel}>
             <label>
-              <span>实例名称</span>
+              <span>名称</span>
               <input
-                value={instanceForm.name}
-                onChange={(event) => setInstanceForm({ ...instanceForm, name: event.target.value })}
-                placeholder="客户 A / 测试环境"
+                value={apiChannelForm.name}
+                onChange={(event) => setApiChannelForm({ ...apiChannelForm, name: event.target.value })}
+                placeholder="inroi"
                 required
               />
             </label>
             <label>
-              <span>绑定账号</span>
-              <select
-                value={instanceForm.bindAccountId}
-                onChange={(event) => setInstanceForm({ ...instanceForm, bindAccountId: event.target.value })}
-              >
-                <option value="">不绑定</option>
-                {state.accounts.map((account) => (
-                  <option value={account.id} key={account.id}>{account.label}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>CODEX_HOME</span>
+              <span>Base URL</span>
               <input
-                value={instanceForm.codexHome}
-                onChange={(event) => setInstanceForm({ ...instanceForm, codexHome: event.target.value })}
-                placeholder="留空自动创建"
+                value={apiChannelForm.baseUrl}
+                onChange={(event) => setApiChannelForm({ ...apiChannelForm, baseUrl: event.target.value })}
+                placeholder="https://www.inroi.shop"
+                required
               />
             </label>
             <label>
-              <span>工作目录</span>
+              <span>API Key</span>
               <input
-                value={instanceForm.workingDir}
-                onChange={(event) => setInstanceForm({ ...instanceForm, workingDir: event.target.value })}
-                placeholder="可选"
+                value={apiChannelForm.apiKey}
+                onChange={(event) => setApiChannelForm({ ...apiChannelForm, apiKey: event.target.value })}
+                type="password"
+                placeholder={editingApiChannelId ? "留空则保留原 Key" : "sk-..."}
+                required={!editingApiChannelId}
               />
             </label>
-            <label>
-              <span>启动参数</span>
-              <input
-                value={instanceForm.extraArgs}
-                onChange={(event) => setInstanceForm({ ...instanceForm, extraArgs: event.target.value })}
-                placeholder="例如 --model gpt-5.4"
-              />
-            </label>
-            <button className="button primary"><Plus size={16} /> 新建实例</button>
+            <div className="api-channel-buttons">
+              <button className="button primary">
+                <Plus size={16} /> {editingApiChannelId ? "更新中转" : "保存中转"}
+              </button>
+              {editingApiChannelId && (
+                <button type="button" className="button ghost" onClick={cancelApiChannelEdit}>
+                  取消
+                </button>
+              )}
+            </div>
           </form>
 
-          <div className="instance-list">
-            {state.instances.map((instance) => {
-              const bound = state.accounts.find((account) => account.id === instance.bindAccountId);
-              return (
-                <article className="list-row instance-row" key={instance.id}>
-                  <div className="row-main">
-                    <div className="row-title">
-                      <strong>{instance.name}</strong>
-                      {instance.isDefault && <span className="pill">默认</span>}
-                      {instance.running && <span className="pill active">运行中</span>}
-                      {!instance.initialized && <span className="pill warn">未初始化</span>}
-                    </div>
-                    <p title={instance.codexHome}>{compactPath(instance.codexHome)}</p>
-                    <small>
-                      账号 {bound?.label ?? "未绑定"} · {instance.workingDir ? `工作目录 ${compactPath(instance.workingDir)}` : "未设置工作目录"} · {formatDate(instance.lastLaunchedAt)}
-                    </small>
-                    <code>{instance.launchCommand}</code>
-                  </div>
-                  <div className="row-actions">
-                    <button className="button small primary" onClick={() => launchInstance(instance)}>
-                      <Play size={14} /> 启动
-                    </button>
-                    {!instance.isDefault && (
-                      <button className="button small ghost" onClick={() => stopInstance(instance)}>
-                        停止
-                      </button>
+          <div className="api-channel-list">
+            {state.apiChannels.length === 0 && (
+              <div className="empty-state">
+                <KeyRound size={20} />
+                <p>还没有 API 中转。保存一个 URL 和 API Key 后，就可以一键切换。</p>
+              </div>
+            )}
+            {state.apiChannels.map((channel) => (
+              <article
+                className={`list-row api-channel-row ${state.currentApiChannelId === channel.id ? "selected" : ""}`}
+                key={channel.id}
+              >
+                <div className="row-main">
+                  <div className="row-title">
+                    <strong>{channel.name}</strong>
+                    {state.currentApiChannelId === channel.id && (
+                      <span className="pill active"><CircleCheck size={13} /> 当前</span>
                     )}
-                    <button className="button small ghost" onClick={() => openPath(instance.codexHome)}>
-                      <FolderOpen size={14} />
-                    </button>
-                    <button className="button small ghost" onClick={() => copyText(instance.launchCommand, "启动命令已复制")}>
-                      <Copy size={14} />
-                    </button>
-                    {!instance.isDefault && (
-                      <button className="button small danger" onClick={() => deleteInstance(instance)}>
-                        <Trash2 size={14} />
-                      </button>
-                    )}
+                    <span className="pill">openai</span>
                   </div>
-                </article>
-              );
-            })}
+                  <p>{channel.baseUrl}</p>
+                  <small>
+                    Key {channel.keyPreview} · 最近使用 {formatDate(channel.lastUsed)}
+                  </small>
+                </div>
+                <div className="row-actions">
+                  <button className="button small primary" onClick={() => switchApiChannel(channel)}>
+                    切换
+                  </button>
+                  <button className="button small ghost" onClick={() => editApiChannel(channel)}>
+                    编辑
+                  </button>
+                  <button className="button small danger" onClick={() => deleteApiChannel(channel)}>
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </article>
+            ))}
           </div>
         </section>
       </div>
-
-      <footer className="footer-bar">
-        <span title={state.codexCli.path ?? ""}>
-          <Terminal size={15} /> {state.codexCli.path ? compactPath(state.codexCli.path) : "未找到 codex.cmd"}
-        </span>
-        <button className="button small ghost" onClick={() => copyText(state.storePath, "数据文件路径已复制")}>
-          复制数据文件路径
-        </button>
-      </footer>
     </main>
   );
 }
