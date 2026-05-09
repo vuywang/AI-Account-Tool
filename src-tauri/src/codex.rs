@@ -21,6 +21,15 @@ use crate::storage::{
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_OAUTH_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
+const SUBSCRIPTION_CONFIG_CLEANUP_KEYS: &[&str] = &[
+    "openai_base_url",
+    "model_provider",
+    "model",
+    "review_model",
+    "model_reasoning_effort",
+    "model_context_window",
+    "model_auto_compact_token_limit",
+];
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -317,6 +326,28 @@ fn write_openai_config(
     write_string_atomic(&path, &doc.to_string())
 }
 
+fn write_subscription_config(codex_home: &Path) -> Result<(), String> {
+    let path = codex_home.join("config.toml");
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let mut doc = if existing.trim().is_empty() {
+        Document::new()
+    } else {
+        existing
+            .parse::<Document>()
+            .map_err(|err| format!("解析 config.toml 失败: {}", err))?
+    };
+
+    for key in SUBSCRIPTION_CONFIG_CLEANUP_KEYS {
+        let _ = doc.remove(key);
+    }
+
+    if doc.to_string().trim().is_empty() && !path.exists() {
+        return Ok(());
+    }
+
+    write_string_atomic(&path, &doc.to_string())
+}
+
 fn write_api_provider_to_config(codex_home: &Path, account: &CodexAccount) -> Result<(), String> {
     if account.auth_mode == CodexAuthMode::Apikey {
         let base_url = account
@@ -326,7 +357,7 @@ fn write_api_provider_to_config(codex_home: &Path, account: &CodexAccount) -> Re
             .filter(|item| !item.is_empty() && item != DEFAULT_OPENAI_BASE_URL);
         return write_openai_config(codex_home, base_url.as_deref(), base_url.is_some());
     } else {
-        return write_openai_config(codex_home, None, false);
+        return write_subscription_config(codex_home);
     }
 }
 
@@ -804,4 +835,53 @@ pub fn spawn_codex_login(codex_home: &Path) -> Result<(), String> {
     let _child =
         hidden_spawn(&mut command).map_err(|err| format!("启动 Codex 登录失败: {}", err))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscription_config_removes_api_relay_overrides() {
+        let dir = env::temp_dir().join(format!(
+            "ai-account-tool-codex-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("config.toml");
+        fs::write(
+            &config_path,
+            r#"
+model = "gpt-5.5"
+review_model = "gpt-5.4"
+model_reasoning_effort = "xhigh"
+model_provider = "openai"
+openai_base_url = "https://www.inroi.shop"
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
+network_access = "enabled"
+windows_wsl_setup_acknowledged = true
+"#,
+        )
+        .unwrap();
+
+        write_subscription_config(&dir).unwrap();
+
+        let content = fs::read_to_string(&config_path).unwrap();
+        let doc = content.parse::<Document>().unwrap();
+        for key in SUBSCRIPTION_CONFIG_CLEANUP_KEYS {
+            assert!(doc.get(key).is_none(), "{key} should be removed");
+        }
+        assert_eq!(
+            doc.get("network_access").and_then(|item| item.as_str()),
+            Some("enabled")
+        );
+        assert_eq!(
+            doc.get("windows_wsl_setup_acknowledged")
+                .and_then(|item| item.as_bool()),
+            Some(true)
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }
